@@ -1,4 +1,4 @@
-import { keccak256, encodePacked, concat, toHex, toBytes } from "viem";
+import { keccak256, encodePacked, concat } from "viem";
 
 export function computeCreate2Address(
   deployer: `0x${string}`,
@@ -6,7 +6,7 @@ export function computeCreate2Address(
   initCodeHash: `0x${string}`,
 ): `0x${string}` {
   const hash = keccak256(
-    concat(["0xff", toBytes(deployer), toBytes(salt), toBytes(initCodeHash)]),
+    concat(["0xff" as `0x${string}`, deployer, salt, initCodeHash]),
   );
   // Take last 20 bytes as address
   return `0x${hash.slice(26)}` as `0x${string}`;
