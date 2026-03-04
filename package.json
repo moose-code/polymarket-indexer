@@ -14,7 +14,8 @@
     "vitest": "4.0.16"
   },
   "dependencies": {
-    "envio": "3.0.0-alpha.14"
+    "envio": "3.0.0-alpha.14",
+    "viem": "^2.0.0"
   },
   "optionalDependencies": {
     "generated": "./polymarket-indexer/../generated"
