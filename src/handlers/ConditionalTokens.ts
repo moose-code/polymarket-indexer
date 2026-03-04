@@ -32,6 +32,7 @@ const SKIP_ACTIVITY = new Set([
 const SKIP_PNL = new Set([
   NEG_RISK_ADAPTER_LOWER,
   EXCHANGE_LOWER,
+  NEG_RISK_EXCHANGE_LOWER,
 ]);
 
 // ============================================================

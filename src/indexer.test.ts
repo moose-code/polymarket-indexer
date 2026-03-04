@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+// @ts-ignore - bignumber.js is nested in generated package
+import BigNumber from "../generated/node_modules/bignumber.js/bignumber.mjs";
 import {
   TestHelpers,
   type FeeRefunded,
@@ -937,5 +939,655 @@ describe("PnL - UserPosition averaging", () => {
     expect(pos!.amount).toBe(1_000_000n); // 2 - 1 = 1
     // realizedPnl = 1_000_000 * (800_000 - 500_000) / 1_000_000 = 300_000
     expect(pos!.realizedPnl).toBe(300_000n);
+  });
+});
+
+// ============================================================
+// Bug Fix Verification Tests
+// ============================================================
+
+describe("Bug Fix: NEG_RISK_EXCHANGE should be skipped for PnL in ConditionalTokens", () => {
+  it("should NOT create UserPosition for NegRiskExchange on PositionSplit", async () => {
+    const mockDb = MockDb.createMockDb();
+    const NEG_RISK_EXCHANGE_ADDR = "0xC5d563A36AE78145C45a50134d48A1215220f80a";
+    const seededDb = mockDb.entities.Condition.set({
+      id: MOCK_CONDITION_ID,
+      positionIds: [100n, 101n],
+      payoutNumerators: [],
+      payoutDenominator: 0n,
+    });
+
+    const mockEvent = ConditionalTokens.PositionSplit.createMockEvent({
+      stakeholder: NEG_RISK_EXCHANGE_ADDR,
+      collateralToken: MOCK_USDC,
+      parentCollectionId: MOCK_PARENT_COLLECTION,
+      conditionId: MOCK_CONDITION_ID,
+      partition: [1n, 2n],
+      amount: 1_000_000n,
+    });
+
+    const result = await ConditionalTokens.PositionSplit.processEvent({
+      event: mockEvent,
+      mockDb: seededDb,
+    });
+
+    // No Split entity (NegRiskExchange is in SKIP_ACTIVITY)
+    const splits = result.entities.Split.getAll();
+    expect(splits.length).toBe(0);
+
+    // No UserPosition (NegRiskExchange should be in SKIP_PNL)
+    const positions = result.entities.UserPosition.getAll();
+    expect(positions.length).toBe(0);
+
+    // OI should still be updated (USDC collateral)
+    const globalOI = result.entities.GlobalOpenInterest.get("");
+    expect(globalOI).toBeDefined();
+    expect(globalOI!.amount).toBe(1_000_000n);
+  });
+
+  it("should NOT create UserPosition for NegRiskExchange on PositionsMerge", async () => {
+    const mockDb = MockDb.createMockDb();
+    const NEG_RISK_EXCHANGE_ADDR = "0xC5d563A36AE78145C45a50134d48A1215220f80a";
+    let seededDb = mockDb.entities.Condition.set({
+      id: MOCK_CONDITION_ID,
+      positionIds: [100n, 101n],
+      payoutNumerators: [],
+      payoutDenominator: 0n,
+    });
+    seededDb = seededDb.entities.MarketOpenInterest.set({
+      id: MOCK_CONDITION_ID,
+      amount: 2_000_000n,
+    });
+    seededDb = seededDb.entities.GlobalOpenInterest.set({
+      id: "",
+      amount: 2_000_000n,
+    });
+
+    const mockEvent = ConditionalTokens.PositionsMerge.createMockEvent({
+      stakeholder: NEG_RISK_EXCHANGE_ADDR,
+      collateralToken: MOCK_USDC,
+      parentCollectionId: MOCK_PARENT_COLLECTION,
+      conditionId: MOCK_CONDITION_ID,
+      partition: [1n, 2n],
+      amount: 500_000n,
+    });
+
+    const result = await ConditionalTokens.PositionsMerge.processEvent({
+      event: mockEvent,
+      mockDb: seededDb,
+    });
+
+    // No Merge entity (NegRiskExchange is in SKIP_ACTIVITY)
+    const merges = result.entities.Merge.getAll();
+    expect(merges.length).toBe(0);
+
+    // No UserPosition (NegRiskExchange should be in SKIP_PNL)
+    const positions = result.entities.UserPosition.getAll();
+    expect(positions.length).toBe(0);
+
+    // OI should still decrease
+    const marketOI = result.entities.MarketOpenInterest.get(MOCK_CONDITION_ID);
+    expect(marketOI!.amount).toBe(1_500_000n);
+  });
+});
+
+describe("Bug Fix: Entity IDs should use logIndex to prevent collisions", () => {
+  it("OrderFilledEvent ID should include logIndex", async () => {
+    const mockDb = MockDb.createMockDb();
+
+    const mockEvent = Exchange.OrderFilled.createMockEvent({
+      orderHash: "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+      maker: Addresses.mockAddresses[0]!,
+      taker: Addresses.mockAddresses[1]!,
+      makerAssetId: 0n,
+      takerAssetId: 42n,
+      makerAmountFilled: 500_000n,
+      takerAmountFilled: 1_000_000n,
+      fee: 0n,
+    });
+
+    const result = await Exchange.OrderFilled.processEvent({
+      event: mockEvent,
+      mockDb,
+    });
+
+    const events = result.entities.OrderFilledEvent.getAll();
+    expect(events.length).toBe(1);
+    // ID should contain logIndex (not orderHash)
+    const eventId = events[0]!.id;
+    expect(eventId).toContain("_");
+    // Should NOT contain the orderHash as part of the ID
+    expect(eventId).not.toContain("abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890");
+  });
+});
+
+// ============================================================
+// Additional Coverage: FPMM Buy/Sell Tests
+// ============================================================
+
+describe("FPMM - Buy", () => {
+  it("should update FPMM metrics and create transaction on buy", async () => {
+    const mockDb = MockDb.createMockDb();
+    const fpmmAddr = Addresses.mockAddresses[0]!;
+
+    let seededDb = mockDb.entities.FixedProductMarketMaker.set({
+      id: fpmmAddr,
+      creator: Addresses.mockAddresses[1]!,
+      creationTimestamp: 100n,
+      creationTransactionHash: "0x1111",
+      collateralToken: MOCK_USDC,
+      conditionalTokenAddress: MOCK_CONDITIONAL_TOKENS.toLowerCase(),
+      conditions: [MOCK_CONDITION_ID],
+      fee: 2000n,
+      outcomeSlotCount: 2n,
+      totalSupply: 10_000_000n,
+      outcomeTokenAmounts: [5_000_000n, 5_000_000n],
+      outcomeTokenPrices: [new BigNumber(0.5), new BigNumber(0.5)],
+      lastActiveDay: 0n,
+      collateralVolume: 0n,
+      scaledCollateralVolume: new BigNumber(0),
+      collateralBuyVolume: 0n,
+      scaledCollateralBuyVolume: new BigNumber(0),
+      collateralSellVolume: 0n,
+      scaledCollateralSellVolume: new BigNumber(0),
+      liquidityParameter: 5_000_000n,
+      scaledLiquidityParameter: new BigNumber(5),
+      feeVolume: 0n,
+      scaledFeeVolume: new BigNumber(0),
+      tradesQuantity: 0n,
+      buysQuantity: 0n,
+      sellsQuantity: 0n,
+      liquidityAddQuantity: 0n,
+      liquidityRemoveQuantity: 0n,
+    });
+    seededDb = seededDb.entities.Condition.set({
+      id: MOCK_CONDITION_ID,
+      positionIds: [100n, 101n],
+      payoutNumerators: [],
+      payoutDenominator: 0n,
+    });
+
+    const mockEvent = FPMMTestHelper.FPMMBuy.createMockEvent({
+      buyer: Addresses.mockAddresses[2]!,
+      investmentAmount: 1_000_000n,
+      feeAmount: 20_000n,
+      outcomeIndex: 0n,
+      outcomeTokensBought: 1_500_000n,
+    });
+    // Override srcAddress to match the FPMM
+    (mockEvent as any).srcAddress = fpmmAddr;
+
+    const result = await FPMMTestHelper.FPMMBuy.processEvent({
+      event: mockEvent,
+      mockDb: seededDb,
+    });
+
+    const fpmm = result.entities.FixedProductMarketMaker.get(fpmmAddr);
+    expect(fpmm).toBeDefined();
+    expect(fpmm!.tradesQuantity).toBe(1n);
+    expect(fpmm!.buysQuantity).toBe(1n);
+    expect(fpmm!.collateralVolume).toBe(1_000_000n);
+    expect(fpmm!.feeVolume).toBe(20_000n);
+
+    // Check transaction was recorded
+    const txns = result.entities.FpmmTransaction.getAll();
+    expect(txns.length).toBe(1);
+    expect(txns[0]!.type).toBe("Buy");
+    expect(txns[0]!.tradeAmount).toBe(1_000_000n);
+  });
+});
+
+describe("FPMM - Sell", () => {
+  it("should update FPMM metrics and create transaction on sell", async () => {
+    const mockDb = MockDb.createMockDb();
+    const fpmmAddr = Addresses.mockAddresses[0]!;
+
+    let seededDb = mockDb.entities.FixedProductMarketMaker.set({
+      id: fpmmAddr,
+      creator: Addresses.mockAddresses[1]!,
+      creationTimestamp: 100n,
+      creationTransactionHash: "0x1111",
+      collateralToken: MOCK_USDC,
+      conditionalTokenAddress: MOCK_CONDITIONAL_TOKENS.toLowerCase(),
+      conditions: [MOCK_CONDITION_ID],
+      fee: 2000n,
+      outcomeSlotCount: 2n,
+      totalSupply: 10_000_000n,
+      outcomeTokenAmounts: [4_000_000n, 6_000_000n],
+      outcomeTokenPrices: [new BigNumber(0.6), new BigNumber(0.4)],
+      lastActiveDay: 0n,
+      collateralVolume: 0n,
+      scaledCollateralVolume: new BigNumber(0),
+      collateralBuyVolume: 0n,
+      scaledCollateralBuyVolume: new BigNumber(0),
+      collateralSellVolume: 0n,
+      scaledCollateralSellVolume: new BigNumber(0),
+      liquidityParameter: 4_898_979n,
+      scaledLiquidityParameter: new BigNumber(4.898979),
+      feeVolume: 0n,
+      scaledFeeVolume: new BigNumber(0),
+      tradesQuantity: 0n,
+      buysQuantity: 0n,
+      sellsQuantity: 0n,
+      liquidityAddQuantity: 0n,
+      liquidityRemoveQuantity: 0n,
+    });
+    seededDb = seededDb.entities.Condition.set({
+      id: MOCK_CONDITION_ID,
+      positionIds: [100n, 101n],
+      payoutNumerators: [],
+      payoutDenominator: 0n,
+    });
+
+    const mockEvent = FPMMTestHelper.FPMMSell.createMockEvent({
+      seller: Addresses.mockAddresses[2]!,
+      returnAmount: 500_000n,
+      feeAmount: 10_000n,
+      outcomeIndex: 0n,
+      outcomeTokensSold: 800_000n,
+    });
+    (mockEvent as any).srcAddress = fpmmAddr;
+
+    const result = await FPMMTestHelper.FPMMSell.processEvent({
+      event: mockEvent,
+      mockDb: seededDb,
+    });
+
+    const fpmm = result.entities.FixedProductMarketMaker.get(fpmmAddr);
+    expect(fpmm).toBeDefined();
+    expect(fpmm!.tradesQuantity).toBe(1n);
+    expect(fpmm!.sellsQuantity).toBe(1n);
+    expect(fpmm!.collateralVolume).toBe(500_000n);
+    expect(fpmm!.collateralSellVolume).toBe(500_000n);
+    expect(fpmm!.feeVolume).toBe(10_000n);
+
+    const txns = result.entities.FpmmTransaction.getAll();
+    expect(txns.length).toBe(1);
+    expect(txns[0]!.type).toBe("Sell");
+  });
+});
+
+// ============================================================
+// Additional Coverage: PnL edge cases
+// ============================================================
+
+describe("PnL - Split creates positions at 50 cents", () => {
+  it("should create UserPositions for both outcomes at FIFTY_CENTS on split", async () => {
+    const mockDb = MockDb.createMockDb();
+    const user = Addresses.mockAddresses[0]!;
+    const seededDb = mockDb.entities.Condition.set({
+      id: MOCK_CONDITION_ID,
+      positionIds: [100n, 101n],
+      payoutNumerators: [],
+      payoutDenominator: 0n,
+    });
+
+    const mockEvent = ConditionalTokens.PositionSplit.createMockEvent({
+      stakeholder: user,
+      collateralToken: MOCK_USDC,
+      parentCollectionId: MOCK_PARENT_COLLECTION,
+      conditionId: MOCK_CONDITION_ID,
+      partition: [1n, 2n],
+      amount: 2_000_000n,
+    });
+
+    const result = await ConditionalTokens.PositionSplit.processEvent({
+      event: mockEvent,
+      mockDb: seededDb,
+    });
+
+    // Should create 2 UserPositions (one for each outcome)
+    const positions = result.entities.UserPosition.getAll();
+    expect(positions.length).toBe(2);
+
+    const pos0 = result.entities.UserPosition.get(`${user}-100`);
+    expect(pos0).toBeDefined();
+    expect(pos0!.amount).toBe(2_000_000n);
+    expect(pos0!.avgPrice).toBe(500_000n); // FIFTY_CENTS
+
+    const pos1 = result.entities.UserPosition.get(`${user}-101`);
+    expect(pos1).toBeDefined();
+    expect(pos1!.amount).toBe(2_000_000n);
+    expect(pos1!.avgPrice).toBe(500_000n); // FIFTY_CENTS
+  });
+});
+
+describe("PnL - Merge sells positions at 50 cents", () => {
+  it("should decrease UserPosition amounts and realize PnL on merge", async () => {
+    const mockDb = MockDb.createMockDb();
+    const user = Addresses.mockAddresses[0]!;
+    let seededDb = mockDb.entities.Condition.set({
+      id: MOCK_CONDITION_ID,
+      positionIds: [100n, 101n],
+      payoutNumerators: [],
+      payoutDenominator: 0n,
+    });
+    // Seed user positions bought at 0.6 and 0.4
+    seededDb = seededDb.entities.UserPosition.set({
+      id: `${user}-100`,
+      user,
+      tokenId: 100n,
+      amount: 2_000_000n,
+      avgPrice: 600_000n,
+      realizedPnl: 0n,
+      totalBought: 2_000_000n,
+    });
+    seededDb = seededDb.entities.UserPosition.set({
+      id: `${user}-101`,
+      user,
+      tokenId: 101n,
+      amount: 2_000_000n,
+      avgPrice: 400_000n,
+      realizedPnl: 0n,
+      totalBought: 2_000_000n,
+    });
+
+    const mockEvent = ConditionalTokens.PositionsMerge.createMockEvent({
+      stakeholder: user,
+      collateralToken: MOCK_USDC,
+      parentCollectionId: MOCK_PARENT_COLLECTION,
+      conditionId: MOCK_CONDITION_ID,
+      partition: [1n, 2n],
+      amount: 1_000_000n,
+    });
+
+    const result = await ConditionalTokens.PositionsMerge.processEvent({
+      event: mockEvent,
+      mockDb: seededDb,
+    });
+
+    const pos0 = result.entities.UserPosition.get(`${user}-100`);
+    expect(pos0).toBeDefined();
+    expect(pos0!.amount).toBe(1_000_000n);
+    // PnL for outcome 0: 1_000_000 * (500_000 - 600_000) / 1_000_000 = -100_000
+    expect(pos0!.realizedPnl).toBe(-100_000n);
+
+    const pos1 = result.entities.UserPosition.get(`${user}-101`);
+    expect(pos1).toBeDefined();
+    expect(pos1!.amount).toBe(1_000_000n);
+    // PnL for outcome 1: 1_000_000 * (500_000 - 400_000) / 1_000_000 = 100_000
+    expect(pos1!.realizedPnl).toBe(100_000n);
+  });
+});
+
+describe("PnL - PayoutRedemption sells at payout price", () => {
+  it("should realize PnL based on condition payouts", async () => {
+    const mockDb = MockDb.createMockDb();
+    const user = Addresses.mockAddresses[0]!;
+    // Condition resolved: outcome 0 won (payout [1, 0])
+    let seededDb = mockDb.entities.Condition.set({
+      id: MOCK_CONDITION_ID,
+      positionIds: [100n, 101n],
+      payoutNumerators: [1n, 0n],
+      payoutDenominator: 1n,
+    });
+    // User holds 1 token of each outcome bought at 0.5
+    seededDb = seededDb.entities.UserPosition.set({
+      id: `${user}-100`,
+      user,
+      tokenId: 100n,
+      amount: 1_000_000n,
+      avgPrice: 500_000n,
+      realizedPnl: 0n,
+      totalBought: 1_000_000n,
+    });
+    seededDb = seededDb.entities.UserPosition.set({
+      id: `${user}-101`,
+      user,
+      tokenId: 101n,
+      amount: 1_000_000n,
+      avgPrice: 500_000n,
+      realizedPnl: 0n,
+      totalBought: 1_000_000n,
+    });
+    seededDb = seededDb.entities.MarketOpenInterest.set({
+      id: MOCK_CONDITION_ID,
+      amount: 1_000_000n,
+    });
+    seededDb = seededDb.entities.GlobalOpenInterest.set({
+      id: "",
+      amount: 1_000_000n,
+    });
+
+    const mockEvent = ConditionalTokens.PayoutRedemption.createMockEvent({
+      redeemer: user,
+      collateralToken: MOCK_USDC,
+      parentCollectionId: MOCK_PARENT_COLLECTION,
+      conditionId: MOCK_CONDITION_ID,
+      indexSets: [1n, 2n],
+      payout: 1_000_000n,
+    });
+
+    const result = await ConditionalTokens.PayoutRedemption.processEvent({
+      event: mockEvent,
+      mockDb: seededDb,
+    });
+
+    // Outcome 0: sell at price 1.0 (payout = 1/1 * SCALE = 1_000_000)
+    // PnL = 1_000_000 * (1_000_000 - 500_000) / 1_000_000 = 500_000
+    const pos0 = result.entities.UserPosition.get(`${user}-100`);
+    expect(pos0).toBeDefined();
+    expect(pos0!.amount).toBe(0n);
+    expect(pos0!.realizedPnl).toBe(500_000n);
+
+    // Outcome 1: sell at price 0.0 (payout = 0/1 * SCALE = 0)
+    // PnL = 1_000_000 * (0 - 500_000) / 1_000_000 = -500_000
+    const pos1 = result.entities.UserPosition.get(`${user}-101`);
+    expect(pos1).toBeDefined();
+    expect(pos1!.amount).toBe(0n);
+    expect(pos1!.realizedPnl).toBe(-500_000n);
+  });
+});
+
+// ============================================================
+// Additional Coverage: FPMM Transfer (pool membership)
+// ============================================================
+
+describe("FPMM - Transfer", () => {
+  it("should update pool membership on LP share transfer", async () => {
+    const mockDb = MockDb.createMockDb();
+    const fpmmAddr = Addresses.mockAddresses[0]!;
+    const from = Addresses.mockAddresses[1]!;
+    const to = Addresses.mockAddresses[2]!;
+
+    // Seed sender membership
+    const seededDb = mockDb.entities.FpmmPoolMembership.set({
+      id: `${fpmmAddr}-${from}`,
+      pool_id: fpmmAddr,
+      funder: from,
+      amount: 5_000_000n,
+    });
+
+    const mockEvent = FPMMTestHelper.Transfer.createMockEvent({
+      from,
+      to,
+      value: 2_000_000n,
+    });
+    (mockEvent as any).srcAddress = fpmmAddr;
+
+    const result = await FPMMTestHelper.Transfer.processEvent({
+      event: mockEvent,
+      mockDb: seededDb,
+    });
+
+    const fromMembership = result.entities.FpmmPoolMembership.get(`${fpmmAddr}-${from}`);
+    expect(fromMembership).toBeDefined();
+    expect(fromMembership!.amount).toBe(3_000_000n);
+
+    const toMembership = result.entities.FpmmPoolMembership.get(`${fpmmAddr}-${to}`);
+    expect(toMembership).toBeDefined();
+    expect(toMembership!.amount).toBe(2_000_000n);
+  });
+});
+
+// ============================================================
+// Additional Coverage: Wallet GlobalUSDCBalance
+// ============================================================
+
+describe("Wallet - GlobalUSDCBalance tracking", () => {
+  it("should create and update GlobalUSDCBalance on wallet receive", async () => {
+    const mockDb = MockDb.createMockDb();
+    const walletAddr = Addresses.mockAddresses[0]!;
+    const senderAddr = Addresses.mockAddresses[1]!;
+
+    const seededDb = mockDb.entities.Wallet.set({
+      id: walletAddr,
+      signer: walletAddr,
+      type: "safe",
+      balance: 0n,
+      lastTransfer: 0n,
+      createdAt: 100n,
+    });
+
+    const mockEvent = USDC.Transfer.createMockEvent({
+      from: senderAddr,
+      to: walletAddr,
+      amount: 1_000_000n,
+    });
+
+    const result = await USDC.Transfer.processEvent({
+      event: mockEvent,
+      mockDb: seededDb,
+    });
+
+    const global = result.entities.GlobalUSDCBalance.get("global");
+    expect(global).toBeDefined();
+    expect(global!.balance).toBe(1_000_000n);
+  });
+
+  it("should net to zero for transfers between two wallets", async () => {
+    const mockDb = MockDb.createMockDb();
+    const wallet1 = Addresses.mockAddresses[0]!;
+    const wallet2 = Addresses.mockAddresses[1]!;
+
+    let seededDb = mockDb.entities.Wallet.set({
+      id: wallet1,
+      signer: wallet1,
+      type: "safe",
+      balance: 5_000_000n,
+      lastTransfer: 0n,
+      createdAt: 100n,
+    });
+    seededDb = seededDb.entities.Wallet.set({
+      id: wallet2,
+      signer: wallet2,
+      type: "safe",
+      balance: 0n,
+      lastTransfer: 0n,
+      createdAt: 100n,
+    });
+    seededDb = seededDb.entities.GlobalUSDCBalance.set({
+      id: "global",
+      balance: 5_000_000n,
+    });
+
+    const mockEvent = USDC.Transfer.createMockEvent({
+      from: wallet1,
+      to: wallet2,
+      amount: 2_000_000n,
+    });
+
+    const result = await USDC.Transfer.processEvent({
+      event: mockEvent,
+      mockDb: seededDb,
+    });
+
+    // Global balance should remain the same
+    const global = result.entities.GlobalUSDCBalance.get("global");
+    expect(global).toBeDefined();
+    expect(global!.balance).toBe(5_000_000n);
+
+    // Individual balances should update
+    expect(result.entities.Wallet.get(wallet1)!.balance).toBe(3_000_000n);
+    expect(result.entities.Wallet.get(wallet2)!.balance).toBe(2_000_000n);
+  });
+});
+
+// ============================================================
+// Additional Coverage: Utility function tests
+// ============================================================
+
+describe("Utility - parseOrderFilled", () => {
+  it("should parse buy order correctly", () => {
+    const { parseOrderFilled } = require("./utils/pnl.js");
+    const result = parseOrderFilled({
+      makerAssetId: 0n,
+      takerAssetId: 42n,
+      makerAmountFilled: 500_000n,
+      takerAmountFilled: 1_000_000n,
+      maker: "0xuser1",
+    });
+
+    expect(result.side).toBe("BUY");
+    expect(result.account).toBe("0xuser1");
+    expect(result.baseAmount).toBe(1_000_000n);
+    expect(result.quoteAmount).toBe(500_000n);
+    expect(result.positionId).toBe(42n);
+  });
+
+  it("should parse sell order correctly", () => {
+    const { parseOrderFilled } = require("./utils/pnl.js");
+    const result = parseOrderFilled({
+      makerAssetId: 42n,
+      takerAssetId: 0n,
+      makerAmountFilled: 1_000_000n,
+      takerAmountFilled: 800_000n,
+      maker: "0xuser1",
+    });
+
+    expect(result.side).toBe("SELL");
+    expect(result.account).toBe("0xuser1");
+    expect(result.baseAmount).toBe(1_000_000n);
+    expect(result.quoteAmount).toBe(800_000n);
+    expect(result.positionId).toBe(42n);
+  });
+});
+
+describe("Utility - computeFpmmPrice", () => {
+  it("should compute FPMM prices correctly", () => {
+    const { computeFpmmPrice } = require("./utils/pnl.js");
+
+    // Equal amounts → 50/50 price
+    expect(computeFpmmPrice([1_000_000n, 1_000_000n], 0)).toBe(500_000n);
+    expect(computeFpmmPrice([1_000_000n, 1_000_000n], 1)).toBe(500_000n);
+
+    // Unequal amounts
+    // price[0] = amounts[1] * SCALE / total = 3_000_000 * 1_000_000 / 4_000_000 = 750_000
+    expect(computeFpmmPrice([1_000_000n, 3_000_000n], 0)).toBe(750_000n);
+    // price[1] = amounts[0] * SCALE / total = 1_000_000 * 1_000_000 / 4_000_000 = 250_000
+    expect(computeFpmmPrice([1_000_000n, 3_000_000n], 1)).toBe(250_000n);
+
+    // Zero amounts
+    expect(computeFpmmPrice([0n, 0n], 0)).toBe(0n);
+  });
+});
+
+describe("Utility - computeNegRiskYesPrice", () => {
+  it("should compute neg-risk YES price correctly", () => {
+    const { computeNegRiskYesPrice } = require("./utils/pnl.js");
+
+    // 2 NO at 0.9 each, 1 YES remaining, 3 questions total
+    // yesPrice = (900_000 * 2 - 1_000_000 * 1) / 1 = 800_000
+    const result = computeNegRiskYesPrice(900_000n, 2, 3);
+    expect(result).toBe(800_000n);
+
+    // All questions are NO (yesCount = 0) → 0
+    expect(computeNegRiskYesPrice(500_000n, 3, 3)).toBe(0n);
+  });
+});
+
+describe("Utility - indexSetContains", () => {
+  it("should check index set membership correctly", () => {
+    const { indexSetContains } = require("./utils/negRisk.js");
+
+    // indexSet = 5 (binary 101) → contains 0 and 2, not 1
+    expect(indexSetContains(5n, 0)).toBe(true);
+    expect(indexSetContains(5n, 1)).toBe(false);
+    expect(indexSetContains(5n, 2)).toBe(true);
+
+    // indexSet = 7 (binary 111) → contains 0, 1, 2
+    expect(indexSetContains(7n, 0)).toBe(true);
+    expect(indexSetContains(7n, 1)).toBe(true);
+    expect(indexSetContains(7n, 2)).toBe(true);
   });
 });

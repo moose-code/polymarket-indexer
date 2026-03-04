@@ -258,7 +258,7 @@ FixedProductMarketMaker.FPMMFundingAdded.handler(async ({ event, context }) => {
 
   // Record funding addition
   context.FpmmFundingAddition.set({
-    id: event.transaction.hash,
+    id: getEventKey(event.chainId, event.block.number, event.logIndex),
     timestamp: BigInt(event.block.timestamp),
     fpmm_id: fpmmAddress,
     funder: event.params.funder,
@@ -359,7 +359,7 @@ FixedProductMarketMaker.FPMMFundingRemoved.handler(
 
     // Record funding removal
     context.FpmmFundingRemoval.set({
-      id: event.transaction.hash,
+      id: getEventKey(event.chainId, event.block.number, event.logIndex),
       timestamp: BigInt(event.block.timestamp),
       fpmm_id: fpmmAddress,
       funder: event.params.funder,

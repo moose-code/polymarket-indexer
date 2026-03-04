@@ -83,7 +83,7 @@ Exchange.OrderFilled.handler(async ({ event, context }) => {
     side === TRADE_TYPE_BUY ? takerAssetId.toString() : makerAssetId.toString();
 
   // Record OrderFilledEvent
-  const eventId = `${event.transaction.hash}_${event.params.orderHash}`;
+  const eventId = `${event.transaction.hash}_${event.logIndex}`;
   context.OrderFilledEvent.set({
     id: eventId,
     transactionHash: event.transaction.hash,
@@ -165,7 +165,7 @@ Exchange.OrdersMatched.handler(async ({ event, context }) => {
 
   // Record OrdersMatchedEvent
   context.OrdersMatchedEvent.set({
-    id: event.transaction.hash,
+    id: `${event.transaction.hash}_${event.logIndex}`,
     timestamp: BigInt(event.block.timestamp),
     makerAssetID: event.params.makerAssetId,
     takerAssetID: event.params.takerAssetId,
