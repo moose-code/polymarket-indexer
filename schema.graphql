@@ -231,6 +231,69 @@ type UserPosition {
 }
 
 ## ============================================================
+## Phase 5: Market Microstructure Dashboard
+## ============================================================
+
+type MarketTick {
+  id: ID!
+  tokenId: String! @index
+  conditionId: String! @index
+  blockNumber: BigInt! @index
+  timestamp: BigInt!
+  price: BigDecimal!
+  volume: BigDecimal!
+  side: String!
+  numFills: BigInt!
+  highPrice: BigDecimal!
+  lowPrice: BigDecimal!
+  openPrice: BigDecimal!
+  closePrice: BigDecimal!
+}
+
+type SpreadTracker {
+  id: ID!
+  tokenId: String! @index
+  hourTimestamp: BigInt! @index
+  avgSpread: BigDecimal!
+  minSpread: BigDecimal!
+  maxSpread: BigDecimal!
+  spreadSampleCount: BigInt!
+}
+
+type VWAPTracker {
+  id: ID!
+  tokenId: String! @index
+  dayTimestamp: BigInt! @index
+  vwap: BigDecimal!
+  totalVolume: BigDecimal!
+  totalValueTraded: BigDecimal!
+}
+
+type MakerTakerFlow {
+  id: ID!
+  tokenId: String! @index
+  hourTimestamp: BigInt! @index
+  makerBuyVolume: BigDecimal!
+  makerSellVolume: BigDecimal!
+  takerBuyVolume: BigDecimal!
+  takerSellVolume: BigDecimal!
+  netMakerFlow: BigDecimal!
+  numMakerOrders: BigInt!
+  numTakerOrders: BigInt!
+}
+
+type MarketImpactEvent {
+  id: ID!
+  tokenId: String! @index
+  timestamp: BigInt! @index
+  orderSize: BigDecimal!
+  priceBeforeFill: BigDecimal!
+  priceAfterFill: BigDecimal!
+  priceImpactBps: BigInt!
+  txHash: String!
+}
+
+## ============================================================
 ## Phase 4B: FPMM
 ## ============================================================
 

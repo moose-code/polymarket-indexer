@@ -5,6 +5,13 @@ import {
   updateUserPositionWithSell,
 } from "../utils/pnl.js";
 import { COLLATERAL_SCALE } from "../utils/constants.js";
+import {
+  computePrice,
+  computePriceImpactBps,
+  getHourBucket,
+  getDayBucket,
+  MARKET_IMPACT_THRESHOLD,
+} from "../utils/microstructure.js";
 
 const TRADE_TYPE_BUY = "Buy";
 const TRADE_TYPE_SELL = "Sell";
@@ -67,6 +74,7 @@ async function getOrCreateGlobal(
 
 // ============================================================
 // OrderFilled — individual order fill records + orderbook updates
+//               + microstructure analytics
 // ============================================================
 
 Exchange.OrderFilled.handler(async ({ event, context }) => {
@@ -149,6 +157,200 @@ Exchange.OrderFilled.handler(async ({ event, context }) => {
       price,
       order.baseAmount,
     );
+  }
+
+  // ============================================================
+  // Microstructure analytics
+  // ============================================================
+
+  const fillPrice = computePrice(
+    event.params.makerAmountFilled,
+    event.params.takerAmountFilled,
+    makerAssetId,
+  );
+  if (fillPrice === 0) return;
+
+  const timestamp = event.block.timestamp;
+  const blockNumber = event.block.number;
+  const volumeScaled = scaleBigInt(size);
+
+  // Look up conditionId from MarketData (may be undefined for unregistered tokens)
+  const marketData = await context.MarketData.get(tokenId);
+  const conditionId = marketData ? marketData.condition : "";
+
+  // --- MarketTick (OHLCV per block) ---
+  const tickId = `${tokenId}-${blockNumber}`;
+  const existingTick = await context.MarketTick.get(tickId);
+
+  if (existingTick) {
+    context.MarketTick.set({
+      ...existingTick,
+      closePrice: fillPrice,
+      highPrice: Math.max(existingTick.highPrice, fillPrice),
+      lowPrice: Math.min(existingTick.lowPrice, fillPrice),
+      volume: existingTick.volume + volumeScaled,
+      numFills: existingTick.numFills + 1n,
+    });
+  } else {
+    context.MarketTick.set({
+      id: tickId,
+      tokenId,
+      conditionId,
+      blockNumber: BigInt(blockNumber),
+      timestamp: BigInt(timestamp),
+      price: fillPrice,
+      volume: volumeScaled,
+      side: side === TRADE_TYPE_BUY ? "BUY" : "SELL",
+      numFills: 1n,
+      highPrice: fillPrice,
+      lowPrice: fillPrice,
+      openPrice: fillPrice,
+      closePrice: fillPrice,
+    });
+  }
+
+  // --- SpreadTracker (hourly spread estimation) ---
+  // Spread is estimated from the difference between the latest buy and sell
+  // prices within the same hour. We track the most recent buy/sell price
+  // via the MarketTick data and compute spread when we see alternating sides.
+  const hourBucket = getHourBucket(timestamp);
+  const spreadId = `${tokenId}-${hourBucket}`;
+  const existingSpread = await context.SpreadTracker.get(spreadId);
+
+  // We estimate spread by looking at the previous tick's close price for
+  // a different side. As a simple heuristic, any price difference from
+  // consecutive fills approximates half-spread * 2.
+  if (existingTick && existingTick.closePrice !== fillPrice) {
+    const spreadEstimate = Math.abs(fillPrice - existingTick.closePrice);
+
+    if (existingSpread) {
+      const newCount = existingSpread.spreadSampleCount + 1n;
+      const newAvg =
+        (existingSpread.avgSpread * Number(existingSpread.spreadSampleCount) +
+          spreadEstimate) /
+        Number(newCount);
+      context.SpreadTracker.set({
+        ...existingSpread,
+        avgSpread: newAvg,
+        minSpread: Math.min(existingSpread.minSpread, spreadEstimate),
+        maxSpread: Math.max(existingSpread.maxSpread, spreadEstimate),
+        spreadSampleCount: newCount,
+      });
+    } else {
+      context.SpreadTracker.set({
+        id: spreadId,
+        tokenId,
+        hourTimestamp: BigInt(hourBucket),
+        avgSpread: spreadEstimate,
+        minSpread: spreadEstimate,
+        maxSpread: spreadEstimate,
+        spreadSampleCount: 1n,
+      });
+    }
+  } else if (!existingSpread) {
+    // Initialize spread tracker even without a sample yet
+    context.SpreadTracker.set({
+      id: spreadId,
+      tokenId,
+      hourTimestamp: BigInt(hourBucket),
+      avgSpread: 0,
+      minSpread: 0,
+      maxSpread: 0,
+      spreadSampleCount: 0n,
+    });
+  }
+
+  // --- VWAPTracker (daily VWAP) ---
+  const dayBucket = getDayBucket(timestamp);
+  const vwapId = `${tokenId}-${dayBucket}`;
+  const existingVwap = await context.VWAPTracker.get(vwapId);
+
+  const tradeValue = fillPrice * volumeScaled;
+
+  if (existingVwap) {
+    const newTotalVolume = existingVwap.totalVolume + volumeScaled;
+    const newTotalValue = existingVwap.totalValueTraded + tradeValue;
+    context.VWAPTracker.set({
+      ...existingVwap,
+      totalVolume: newTotalVolume,
+      totalValueTraded: newTotalValue,
+      vwap: newTotalVolume > 0 ? newTotalValue / newTotalVolume : 0,
+    });
+  } else {
+    context.VWAPTracker.set({
+      id: vwapId,
+      tokenId,
+      dayTimestamp: BigInt(dayBucket),
+      vwap: fillPrice,
+      totalVolume: volumeScaled,
+      totalValueTraded: tradeValue,
+    });
+  }
+
+  // --- MakerTakerFlow (hourly maker/taker classification) ---
+  // In Polymarket's CLOB, the maker is the limit order poster and the
+  // taker is the order that crosses the spread (market order).
+  const flowId = `${tokenId}-${hourBucket}`;
+  const existingFlow = await context.MakerTakerFlow.get(flowId);
+
+  const isBuy = side === TRADE_TYPE_BUY;
+  const makerBuyVol = isBuy ? volumeScaled : 0;
+  const makerSellVol = isBuy ? 0 : volumeScaled;
+  const takerBuyVol = isBuy ? 0 : volumeScaled;
+  const takerSellVol = isBuy ? volumeScaled : 0;
+
+  if (existingFlow) {
+    const newMakerBuy = existingFlow.makerBuyVolume + makerBuyVol;
+    const newMakerSell = existingFlow.makerSellVolume + makerSellVol;
+    const newTakerBuy = existingFlow.takerBuyVolume + takerBuyVol;
+    const newTakerSell = existingFlow.takerSellVolume + takerSellVol;
+    context.MakerTakerFlow.set({
+      ...existingFlow,
+      makerBuyVolume: newMakerBuy,
+      makerSellVolume: newMakerSell,
+      takerBuyVolume: newTakerBuy,
+      takerSellVolume: newTakerSell,
+      netMakerFlow: (newMakerBuy + newMakerSell) - (newTakerBuy + newTakerSell),
+      numMakerOrders: existingFlow.numMakerOrders + 1n,
+      numTakerOrders: existingFlow.numTakerOrders + 1n,
+    });
+  } else {
+    context.MakerTakerFlow.set({
+      id: flowId,
+      tokenId,
+      hourTimestamp: BigInt(hourBucket),
+      makerBuyVolume: makerBuyVol,
+      makerSellVolume: makerSellVol,
+      takerBuyVolume: takerBuyVol,
+      takerSellVolume: takerSellVol,
+      netMakerFlow: (makerBuyVol + makerSellVol) - (takerBuyVol + takerSellVol),
+      numMakerOrders: 1n,
+      numTakerOrders: 1n,
+    });
+  }
+
+  // --- MarketImpactEvent (large orders only) ---
+  // Compute USDC size of this order for threshold check
+  const usdcSize = makerAssetId === 0n
+    ? event.params.makerAmountFilled
+    : event.params.takerAmountFilled;
+
+  if (usdcSize >= MARKET_IMPACT_THRESHOLD && existingTick) {
+    const priceBefore = existingTick.closePrice;
+    const priceAfter = fillPrice;
+    const impactBps = computePriceImpactBps(priceBefore, priceAfter);
+
+    const impactId = `${event.transaction.hash}_${event.logIndex}`;
+    context.MarketImpactEvent.set({
+      id: impactId,
+      tokenId,
+      timestamp: BigInt(timestamp),
+      orderSize: scaleBigInt(usdcSize),
+      priceBeforeFill: priceBefore,
+      priceAfterFill: priceAfter,
+      priceImpactBps: BigInt(impactBps),
+      txHash: event.transaction.hash,
+    });
   }
 });
 
