@@ -112,3 +112,76 @@ type OrdersMatchedGlobal {
   collateralSellVolume: BigDecimal!
   scaledCollateralSellVolume: BigDecimal!
 }
+
+## ============================================================
+## Phase 3A: Open Interest
+## ============================================================
+
+type Condition {
+  id: ID!
+}
+
+type NegRiskEvent {
+  id: ID!
+  feeBps: BigInt!
+  questionCount: BigInt!
+}
+
+type MarketOpenInterest {
+  id: ID!
+  amount: BigInt!
+}
+
+type GlobalOpenInterest {
+  id: ID!
+  amount: BigInt!
+}
+
+## ============================================================
+## Phase 3B: Activity
+## ============================================================
+
+type Split {
+  id: ID!
+  timestamp: BigInt! @index
+  stakeholder: String! @index
+  condition: String! @index
+  amount: BigInt!
+}
+
+type Merge {
+  id: ID!
+  timestamp: BigInt! @index
+  stakeholder: String! @index
+  condition: String! @index
+  amount: BigInt!
+}
+
+type Redemption {
+  id: ID!
+  timestamp: BigInt! @index
+  redeemer: String! @index
+  condition: String! @index
+  indexSets: [BigInt!]!
+  payout: BigInt!
+}
+
+type NegRiskConversion {
+  id: ID!
+  timestamp: BigInt! @index
+  stakeholder: String! @index
+  negRiskMarketId: String! @index
+  amount: BigInt!
+  indexSet: BigInt!
+  questionCount: BigInt!
+}
+
+type Position {
+  id: ID!
+  condition: String! @index
+  outcomeIndex: BigInt!
+}
+
+type FixedProductMarketMaker {
+  id: ID!
+}
