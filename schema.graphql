@@ -29,6 +29,7 @@ type Game {
 type Market {
   id: ID!
   gameId: String! @index
+  conditionId: String! @index
   state: String! @index
   marketType: String!
   underdog: String!
@@ -283,4 +284,60 @@ type FpmmPoolMembership {
   pool_id: String! @index
   funder: String! @index
   amount: BigInt!
+}
+
+## ============================================================
+## Phase 5: Smart Money Flow
+## ============================================================
+
+type WalletScore {
+  id: ID!
+  totalMarketsEntered: BigInt!
+  totalMarketsResolved: BigInt!
+  correctPredictions: BigInt!
+  incorrectPredictions: BigInt!
+  accuracy: BigDecimal!
+  avgEntryTiming: BigDecimal!
+  totalProfitUSDC: BigInt!
+  totalLossUSDC: BigInt!
+  netPnl: BigInt!
+  currentOpenPositions: BigInt!
+  lastActivityTimestamp: BigInt!
+  walletAge: BigInt!
+  isSmartMoney: Boolean!
+}
+
+type EarlyPosition {
+  id: ID!
+  walletAddress: String! @index
+  conditionId: String! @index
+  entryTimestamp: BigInt!
+  entryPrice: BigInt!
+  side: String!
+  positionSize: BigInt!
+  marketResolutionTimestamp: BigInt
+  outcome: String
+  pnl: BigInt
+  entryRank: BigInt!
+}
+
+type MarketEntryTimeline {
+  id: ID!
+  conditionId: String! @index
+  totalEntrants: BigInt!
+  firstEntryTimestamp: BigInt!
+  medianEntryTimestamp: BigInt!
+  resolutionTimestamp: BigInt
+  winningOutcome: String
+}
+
+type SmartMoneyAlert {
+  id: ID!
+  walletAddress: String! @index
+  conditionId: String!
+  tokenId: String!
+  side: String!
+  size: BigInt!
+  price: BigInt!
+  timestamp: BigInt! @index
 }

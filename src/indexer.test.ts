@@ -167,6 +167,7 @@ describe("UmaSportsOracle", () => {
     const seededDb = mockDb.entities.Market.set({
       id: marketId,
       gameId: "0x000000000000000000000000000000000000000000000000000000000000abcd",
+      conditionId: "0x0000000000000000000000000000000000000000000000000000000000002222",
       state: "Created",
       marketType: "moneyline",
       underdog: "away",

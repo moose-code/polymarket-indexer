@@ -5,6 +5,7 @@ import {
   updateUserPositionWithSell,
 } from "../utils/pnl.js";
 import { COLLATERAL_SCALE } from "../utils/constants.js";
+import { updateMedianTimestamp } from "../utils/smartMoney.js";
 
 const TRADE_TYPE_BUY = "Buy";
 const TRADE_TYPE_SELL = "Sell";
@@ -67,6 +68,8 @@ async function getOrCreateGlobal(
 
 // ============================================================
 // OrderFilled — individual order fill records + orderbook updates
+// + Smart Money Flow: EarlyPosition, MarketEntryTimeline,
+//   WalletScore, SmartMoneyAlert
 // ============================================================
 
 Exchange.OrderFilled.handler(async ({ event, context }) => {
@@ -149,6 +152,160 @@ Exchange.OrderFilled.handler(async ({ event, context }) => {
       price,
       order.baseAmount,
     );
+  }
+
+  // ============================================================
+  // Smart Money Flow: Track early positions and wallet scores
+  // CROSS-ENTITY: This reads MarketData (Exchange), Position (CTF),
+  // WalletScore, EarlyPosition, and MarketEntryTimeline — only
+  // possible because this unified indexer combines all subgraphs.
+  // ============================================================
+
+  // Only track BUY orders for smart money (entering positions)
+  if (order.side !== "BUY") return;
+
+  const walletAddress = order.account;
+  const timestamp = BigInt(event.block.timestamp);
+
+  // CROSS-ENTITY: Read MarketData (from Exchange.TokenRegistered) to get conditionId
+  const marketData = await context.MarketData.get(tokenId);
+  if (!marketData) return; // Token not registered yet
+
+  const conditionId = marketData.condition;
+
+  // CROSS-ENTITY: Read Position (from ConditionalTokens.ConditionPreparation) to get outcome side
+  const position = await context.Position.get(tokenId);
+  const positionSide = position
+    ? position.outcomeIndex === 0n
+      ? "YES"
+      : "NO"
+    : "YES"; // Default YES if position not found
+
+  // Update or create MarketEntryTimeline for this condition
+  const earlyPositionId = `${walletAddress}-${conditionId}`;
+  const existingPosition = await context.EarlyPosition.get(earlyPositionId);
+  const isNewEntry = !existingPosition;
+
+  let timeline = await context.MarketEntryTimeline.get(conditionId);
+  if (!timeline) {
+    timeline = {
+      id: conditionId,
+      conditionId,
+      totalEntrants: 0n,
+      firstEntryTimestamp: timestamp,
+      medianEntryTimestamp: timestamp,
+      resolutionTimestamp: undefined,
+      winningOutcome: undefined,
+    };
+  }
+
+  let entryRank = existingPosition ? existingPosition.entryRank : 0n;
+
+  if (isNewEntry) {
+    // New entrant — increment timeline and assign rank
+    const newTotal = timeline.totalEntrants + 1n;
+    const newMedian = updateMedianTimestamp(
+      timeline.medianEntryTimestamp,
+      timestamp,
+      newTotal,
+    );
+    entryRank = newTotal;
+
+    context.MarketEntryTimeline.set({
+      ...timeline,
+      totalEntrants: newTotal,
+      firstEntryTimestamp:
+        timestamp < timeline.firstEntryTimestamp
+          ? timestamp
+          : timeline.firstEntryTimestamp,
+      medianEntryTimestamp: newMedian,
+    });
+  }
+
+  // Create or update EarlyPosition
+  if (existingPosition) {
+    // Accumulate position: weighted avg entry price, add to position size
+    const totalSize = existingPosition.positionSize + order.baseAmount;
+    const weightedPrice =
+      totalSize > 0n
+        ? (existingPosition.entryPrice * existingPosition.positionSize +
+            price * order.baseAmount) /
+          totalSize
+        : price;
+
+    context.EarlyPosition.set({
+      ...existingPosition,
+      entryPrice: weightedPrice,
+      positionSize: totalSize,
+    });
+  } else {
+    context.EarlyPosition.set({
+      id: earlyPositionId,
+      walletAddress,
+      conditionId,
+      entryTimestamp: timestamp,
+      entryPrice: price,
+      side: positionSide,
+      positionSize: order.baseAmount,
+      marketResolutionTimestamp: undefined,
+      outcome: undefined,
+      pnl: undefined,
+      entryRank,
+    });
+  }
+
+  // CROSS-ENTITY: Read/update WalletScore — tracks lifetime stats across
+  // Wallet creation, Exchange orders, CTF positions, and Oracle resolution
+  let walletScore = await context.WalletScore.get(walletAddress);
+  if (!walletScore) {
+    walletScore = {
+      id: walletAddress,
+      totalMarketsEntered: 0n,
+      totalMarketsResolved: 0n,
+      correctPredictions: 0n,
+      incorrectPredictions: 0n,
+      accuracy: 0,
+      avgEntryTiming: 0,
+      totalProfitUSDC: 0n,
+      totalLossUSDC: 0n,
+      netPnl: 0n,
+      currentOpenPositions: 0n,
+      lastActivityTimestamp: timestamp,
+      walletAge: timestamp,
+      isSmartMoney: false,
+    };
+  }
+
+  if (isNewEntry) {
+    context.WalletScore.set({
+      ...walletScore,
+      totalMarketsEntered: walletScore.totalMarketsEntered + 1n,
+      currentOpenPositions: walletScore.currentOpenPositions + 1n,
+      lastActivityTimestamp: timestamp,
+    });
+  } else {
+    context.WalletScore.set({
+      ...walletScore,
+      lastActivityTimestamp: timestamp,
+    });
+  }
+
+  // SmartMoneyAlert: If this wallet is flagged as smart money, create an alert
+  // CROSS-ENTITY: Uses WalletScore (aggregated from Oracle + CTF + Exchange data)
+  // to decide if this new position is noteworthy.
+  // Demo: "This wallet has been right on 47/50 markets and just bought YES on [current market]."
+  if (walletScore.isSmartMoney) {
+    const alertId = `${event.chainId}-${event.block.number}-${event.logIndex}`;
+    context.SmartMoneyAlert.set({
+      id: alertId,
+      walletAddress,
+      conditionId,
+      tokenId,
+      side: positionSide,
+      size: order.baseAmount,
+      price,
+      timestamp,
+    });
   }
 });
 

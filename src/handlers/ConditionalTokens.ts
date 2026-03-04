@@ -14,6 +14,7 @@ import {
   updateUserPositionWithSell,
   loadOrCreateUserPosition,
 } from "../utils/pnl.js";
+import { computeAccuracy, checkIsSmartMoney } from "../utils/smartMoney.js";
 
 const USDC_LOWER = USDC.toLowerCase();
 const NEG_RISK_ADAPTER_LOWER = NEG_RISK_ADAPTER.toLowerCase();
@@ -299,6 +300,41 @@ ConditionalTokens.PayoutRedemption.handler(async ({ event, context }) => {
         price,
         amount,
       );
+    }
+
+    // ============================================================
+    // Smart Money Flow: Update EarlyPosition + WalletScore with
+    // realized PnL from redemption.
+    // CROSS-ENTITY: Reads EarlyPosition (created in Exchange handler),
+    // Condition payout data (from ConditionResolution), and WalletScore
+    // (aggregated across all subgraphs) to finalize PnL on redemption.
+    // ============================================================
+
+    const earlyPositionId = `${redeemer}-${conditionId}`;
+    const earlyPosition = await context.EarlyPosition.get(earlyPositionId);
+    if (earlyPosition && earlyPosition.pnl !== undefined) {
+      const realizedPnl = earlyPosition.pnl;
+
+      // Update WalletScore with realized PnL from redemption
+      const walletScore = await context.WalletScore.get(redeemer);
+      if (walletScore) {
+        const newProfit =
+          realizedPnl > 0n
+            ? walletScore.totalProfitUSDC + realizedPnl
+            : walletScore.totalProfitUSDC;
+        const newLoss =
+          realizedPnl < 0n
+            ? walletScore.totalLossUSDC + (-realizedPnl)
+            : walletScore.totalLossUSDC;
+
+        context.WalletScore.set({
+          ...walletScore,
+          totalProfitUSDC: newProfit,
+          totalLossUSDC: newLoss,
+          netPnl: walletScore.netPnl + realizedPnl,
+          lastActivityTimestamp: BigInt(event.block.timestamp),
+        });
+      }
     }
   }
 });
