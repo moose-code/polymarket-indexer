@@ -949,11 +949,11 @@ describe("Integration - OrdersMatchedGlobal no numeric overflow", () => {
     const { createTestIndexer } = await import("generated");
     const indexer = createTestIndexer();
 
-    // Process a range around block 35.9M where Exchange was active
-    // This is near where the overflow originally occurred
+    // Process the exact range where the overflow occurred in production:
+    // batch progress was at 35,901,247, fetching from 35,900,780
     const result = await indexer.process({
       chains: {
-        137: { startBlock: 35_900_000, endBlock: 35_905_000 },
+        137: { startBlock: 35_900_780, endBlock: 35_902_000 },
       },
     });
 
