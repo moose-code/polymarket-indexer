@@ -18,7 +18,11 @@ export const getMarketMetadata = createEffect(
       }),
       null,
     ]),
-    cache: false,
+    // Market metadata (question, slug, outcomes, conditionId) is immutable once
+    // the market exists. outcomePrices is a snapshot at first-fetch time; if the
+    // dashboard needs live prices, it should pull those separately from the CLOB
+    // orderbook — the indexer is not the right place for perpetually-fresh prices.
+    cache: true,
     rateLimit: { calls: 280, per: 10_000 }, // 280 req / 10s — under Gamma API 300/10s limit
   },
   async ({ input: tokenId }) => {
