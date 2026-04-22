@@ -19,6 +19,9 @@ import "../../handlers/ConditionalTokens.js";
 import "../../handlers/NegRiskAdapter.js";
 import "../../handlers/FPMMFactory.js";
 import "../../handlers/FixedProductMarketMaker.js";
+import "../../handlers/v2/CTFExchangeV2.js";
+import "../../handlers/v2/PolyUSD.js";
+import "../../handlers/v2/Rewards.js";
 
 // ============================================================
 // Destructured TestHelpers
@@ -36,6 +39,9 @@ export const {
   NegRiskAdapter,
   FPMMFactory,
   FixedProductMarketMaker: FPMMTestHelper,
+  CTFExchangeV2,
+  PolyUSD,
+  Rewards,
   Addresses,
 } = TestHelpers;
 
